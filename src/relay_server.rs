@@ -35,6 +35,7 @@ lazy_static::lazy_static! {
     static ref USAGE: RwLock<HashMap<String, Usage>> = Default::default();
     static ref BLACKLIST: RwLock<HashSet<String>> = Default::default();
     static ref BLOCKLIST: RwLock<HashSet<String>> = Default::default();
+    static ref WHITELIST: RwLock<HashSet<String>> = Default::default();
 }
 
 static DOWNGRADE_THRESHOLD_100: AtomicUsize = AtomicUsize::new(66); // 0.66
@@ -44,6 +45,7 @@ static TOTAL_BANDWIDTH: AtomicUsize = AtomicUsize::new(1024 * 1024 * 1024); // i
 static SINGLE_BANDWIDTH: AtomicUsize = AtomicUsize::new(16 * 1024 * 1024); // in bit/s
 const BLACKLIST_FILE: &str = "blacklist.txt";
 const BLOCKLIST_FILE: &str = "blocklist.txt";
+const WHITELIST_FILE: &str = "whitelist.txt";
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn start(port: &str, key: &str) -> ResultType<()> {
@@ -77,6 +79,23 @@ pub async fn start(port: &str, key: &str) -> ResultType<()> {
         "#blocklist({}): {}",
         BLOCKLIST_FILE,
         BLOCKLIST.read().await.len()
+    );
+    if let Ok(mut file) = std::fs::File::open(WHITELIST_FILE) {
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_ok() {
+            for x in contents.split('\n') {
+                if let Some(id) = x.trim().split(' ').next() {
+                    if !id.is_empty() {
+                        WHITELIST.write().await.insert(id.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    log::info!(
+        "#whitelist({}): {}",
+        WHITELIST_FILE,
+        WHITELIST.read().await.len()
     );
     let port: u16 = port.parse()?;
     log::info!("Listening on tcp :{}", port);
@@ -157,13 +176,16 @@ async fn check_cmd(cmd: &str, limiter: Limiter) -> String {
     match fds.next() {
         Some("h") => {
             res = format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
                 "blacklist-add(ba) <ip>",
                 "blacklist-remove(br) <ip>",
                 "blacklist(b) <ip>",
                 "blocklist-add(Ba) <ip>",
                 "blocklist-remove(Br) <ip>",
                 "blocklist(B) <ip>",
+                "whitelist-add(wa) <id>",
+                "whitelist-remove(wr) <id>",
+                "whitelist(w) <id>",
                 "downgrade-threshold(dt) [value]",
                 "downgrade-start-check(t) [value(second)]",
                 "limit-speed(ls) [value(Mb/s)]",
@@ -223,6 +245,33 @@ async fn check_cmd(cmd: &str, limiter: Limiter) -> String {
             } else {
                 for ip in BLOCKLIST.read().await.clone().into_iter() {
                     let _ = writeln!(res, "{ip}");
+                }
+            }
+        }
+        Some("whitelist-add" | "wa") => {
+            if let Some(id) = fds.next() {
+                for id in id.split('|') {
+                    WHITELIST.write().await.insert(id.to_owned());
+                }
+            }
+        }
+        Some("whitelist-remove" | "wr") => {
+            if let Some(id) = fds.next() {
+                if id == "all" {
+                    WHITELIST.write().await.clear();
+                } else {
+                    for id in id.split('|') {
+                        WHITELIST.write().await.remove(id);
+                    }
+                }
+            }
+        }
+        Some("whitelist" | "w") => {
+            if let Some(id) = fds.next() {
+                res = format!("{}\n", WHITELIST.read().await.get(id).is_some());
+            } else {
+                for id in WHITELIST.read().await.clone().into_iter() {
+                    let _ = writeln!(res, "{id}");
                 }
             }
         }
@@ -428,6 +477,11 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
             if let Some(rendezvous_message::Union::RequestRelay(rf)) = msg_in.union {
                 if !key.is_empty() && rf.licence_key != key {
+                    return;
+                }
+                let whitelist = WHITELIST.read().await;
+                if !whitelist.is_empty() && !whitelist.contains(&rf.id) {
+                    log::info!("{} not in whitelist, rejected", rf.id);
                     return;
                 }
                 if !rf.uuid.is_empty() {
