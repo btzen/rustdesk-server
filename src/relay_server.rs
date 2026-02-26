@@ -480,7 +480,8 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     return;
                 }
                 let whitelist = WHITELIST.read().await;
-                if !whitelist.is_empty() && !whitelist.contains(&rf.id) {
+                // 如果 rf.id 为空，跳过白名单检查（请求方）
+                if !rf.id.is_empty() && !whitelist.is_empty() && !whitelist.contains(&rf.id) {
                     log::info!("{} not in whitelist, rejected", rf.id);
                     return;
                 }
